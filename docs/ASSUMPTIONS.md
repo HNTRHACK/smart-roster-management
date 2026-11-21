@@ -55,6 +55,7 @@ Every assumption made while building, grouped by phase. The README's assumptions
 
 **Weekly offs (§3.3)**
 - **Partial weeks are pro-rated.** Weeks run Mon–Sun, clipped to the month. Offs needed = `round(weekly_offs_per_week × days / 7)`, so with 1 off a week, a stub of 4–7 days needs 1 off and a stub of 1–3 days needs none.
+- **Boundary weeks look across the month edge** (Phase 3.1, user decision). A partial first or last week is judged against its full Mon–Sun week: a day just outside the month when the person's brands are closed anyway counts as that week's off. Example: Fieldnote Journals is Mon–Sat. Sun 3 Jan is closed for its agent and falls in the same week as 28–31 Dec, so they need no off in that December stub. Before this rule they were forced off on Wed 30 Dec, and Fieldnote ACC (no backup in the pod) became an unfixable gap. Leave or holidays outside the month never count. The generator and validator use the same rule (`outsideStructuralOffs`).
 - **The requirement is capped at the days that could hold an off.** A week spent mostly on leave doesn't demand impossible offs. WEEK_OFF and NOT_SCHEDULED days count toward it; HOLIDAY, LEAVE and COMP_OFF don't.
 - **Each month starts a fresh consecutive-days count on day 1.** The previous month's roster isn't consulted yet; Phase 6 replan can add that.
 - **Processing order:**
@@ -64,17 +65,33 @@ Every assumption made while building, grouped by phase. The README's assumptions
   4. **Floaters and pod leads, last.** §3.3 only lists the first three groups. Putting backups last lets them place their offs once every gap is known.
 
   Ties within a group go by employee id.
-- **Extensions to the §3.3 cost function.** §3.3 scores every day of a sole agent at +1000, so the +20 preference ends up deciding. Without these extensions, offs piled up on the same days (often Sundays, because of preferences), beyond what a pod's backups could cover. In December that left 44 HARD issues and 95.3% coverage; with the extensions it's 23 HARD and 97.5%. The extensions:
-  - **+500 when an off opens a gap and no backup is left free that day.** It's charged once per day, so it can never outweigh a spec +1000 term such as max-consecutive. Each chosen off earmarks a backup, so later offs compete for whatever capacity is left.
-  - **For floaters and pod leads:** +100 for each open gap they could fill that day, and +300 for each gap they're already earmarked for.
-  - **The trade-off:** more SOFT `PREFERENCE_VIOLATED` issues (17 instead of 8 in December), because coverage beats preference.
+- **Extensions to the §3.3 cost function.** Each is capped so it can never outweigh a spec +1000 term such as coverage or max-consecutive:
+  - **+500 for a person with primary work** when the off opens a gap and no eligible backup is even working that day, typically a public holiday or someone's leave. It's charged once per day. Without it, Kavya Reddy took her weekly off on Republic Day (26 Jan), when every possible backup also had the holiday, which left Copperleaf Kitchen CS uncovered.
+  - **For floaters and pod leads:** +100 for each open gap they could fill that day, and +300 for each gap that nobody else eligible is working to cover. The sum is clamped to 900. Without the scarcity part, Tara Dsouza (the only possible cover for Cobalt Cookware RET) took the same day off as Ishita Banerjee.
+  - **How this evolved.** Phase 3 had a heavier version: a planner that earmarked a specific backup per gap, with +500 per brand-process and +300 per earmark. Phase 3.1 removed it. Once backups could cover concurrently (see Backups below), capacity was no longer the limit. The planner's terms also added up past +1000 and broke the max-consecutive rule twice (Farhan Sheikh, then Vikram Rao, both in January).
+
+  | December 2026 | HARD issues | Coverage | PREFERENCE_VIOLATED |
+  |---|---|---|---|
+  | Phase 3, first run: overlap rule, pod leads placed too early, no extensions | 44 | 95.3% | 8 |
+  | Phase 3: overlap rule plus the earmarking planner | 23 | 97.5% | 17 |
+  | Phase 3.1: concurrency plus a flat floater term | 6 | 99.4% | – |
+  | **Phase 3.1, final: concurrency plus the capped terms above** | **5 (Saltmarsh only)** | **99.5%** | **8** |
+
+  January 2027 with the final version: 4 HARD issues (Saltmarsh only) and 99.6% coverage.
 - **Tie-break.** "employee id + date" is implemented as a stable hash of `employee_id|date`. It's deterministic, and unlike "earliest date wins" it doesn't put everyone's off on a Monday.
 - **Locked and MANUAL days** passed in as `fixedDays` are never changed. They count toward weekly offs and consecutive days like any other day. This is the basis for test 7; `replan` (§3.6) itself arrives in Phase 6.
 
 **Backups (§3.4)**
 - **Who counts as a candidate:** someone with a backup assignment on that brand-process, or anyone in the same pod assigned (primary or backup) to the same process on another brand.
-- **Load limits:** at most 3 brand-processes per person per day. A backup can't cover two *different* brands with overlapping shifts. Because almost every demo brand runs 09:00–18:00, in practice a backup covers one other brand per day, and that limit is what drives most of the remaining gaps.
-- **Shift overlap is only checked across different brands.** Processes of the same brand overlapping in time count as normal multitasking. An end time at or before the start time means an overnight shift.
+- **Backup cover can run at the same time as the backup's own shift** (Phase 3.1, user decision). §3.4's "no shift overlap" and the daily limit of 3 brand-processes can't both hold when nearly every brand runs 09:00–18:00. Under the overlap rule, a backup could cover only one other brand per day. CS, ACC, NDR and RET are ticket and chat queues, so one person can work several at once. The limit that applies is the **load cap: at most 3 brand-processes per person per day, counting their own primary work plus what they cover**. They must also be WORK that day and eligible as above.
+- **`SHIFT_OVERLAP` applies to primary assignments only,** and only across different brands. A person primary on two brands with overlapping shifts is flagged. Backup cover never triggers it. Processes of the same brand overlapping in time count as normal multitasking. An end time at or before the start time means an overnight shift.
+- **Backups are ranked to spread the load:**
+  1. fewest backup covers this month
+  2. same pod
+  3. fewest brand-processes already that day
+  4. employee id
+
+  `BACKUP_OVERLOAD` stays SOFT. In December, Tara Dsouza still carries the most (18 covers). She's the only cover for several NDR/RET/ACC brand-processes across pods, so the fix is cross-training more people, which is a setup change.
 
 **Validator (§3.5)**
 - **What it reads:** it uses only `(input, roster)`, so it treats generated and hand-edited rosters the same way. A coverage row only counts if that employee is WORK that day. A missing day row counts as not working.

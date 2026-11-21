@@ -4,7 +4,6 @@
  */
 import type { RosterDayStatus } from '../../types/db.ts'
 import type { Context } from './context.ts'
-import { shiftsOverlap } from './rules.ts'
 
 /** Read-only view of a roster that both the generator and the validator can provide. */
 export type RosterView = {
@@ -31,9 +30,14 @@ export function eligibleByAssignment(ctx: Context, employeeId: string, bpId: str
 }
 
 /**
- * Ranked people who could cover `bpId` on `date` right now:
- * working that day, not already on it, under the daily load cap, and with no shift clash on a
- * different brand. Ranked: same pod > fewer coverages that day > fewer backup covers this month > id.
+ * Ranked people who could cover `bpId` on `date` right now: working that day, eligible, not
+ * already on it, and under the daily load cap (own work + backup cover).
+ *
+ * Backup cover may run concurrently with the backup's own shift: CS/ACC/NDR/RET are ticket/chat
+ * queues, so the load cap — not shift times — is what limits a backup. (SHIFT_OVERLAP applies to
+ * primary assignments only.)
+ *
+ * Ranked to spread load: fewest backup covers this month > same pod > fewer coverages that day > id.
  */
 export function backupCandidates(
   ctx: Context,
@@ -42,8 +46,7 @@ export function backupCandidates(
   date: string,
   loadCap: number,
 ): BackupCandidate[] {
-  const targetBrand = ctx.brandOf(bpId)
-  const targetShift = ctx.shift.get(bpId)!
+  const targetPod = ctx.brandOf(bpId).pod_id
   const out: (BackupCandidate & { load: number; backups: number })[] = []
 
   for (const e of ctx.employees) {
@@ -52,18 +55,14 @@ export function backupCandidates(
     if (view.status(e.id, date) !== 'WORK') continue
     const covers = view.coversOn(e.id, date)
     if (covers.includes(bpId) || covers.length >= loadCap) continue
-    const clash = covers.some(
-      (c) => ctx.brandOf(c).id !== targetBrand.id && shiftsOverlap(ctx.shift.get(c)!, targetShift),
-    )
-    if (clash) continue
-    out.push({ employeeId: e.id, samePod: e.pod_id === targetBrand.pod_id, reason, load: covers.length, backups: view.backupCount(e.id) })
+    out.push({ employeeId: e.id, samePod: e.pod_id === targetPod, reason, load: covers.length, backups: view.backupCount(e.id) })
   }
 
   out.sort(
     (a, b) =>
+      a.backups - b.backups ||
       Number(b.samePod) - Number(a.samePod) ||
       a.load - b.load ||
-      a.backups - b.backups ||
       a.employeeId.localeCompare(b.employeeId),
   )
   return out.map(({ employeeId, samePod, reason }) => ({ employeeId, samePod, reason }))

@@ -30,7 +30,23 @@ describe.each([['2026-12'], ['2027-01']])('generator hygiene for %s', (month) =>
   )
 })
 
+describe('seed roster, January 2027', () => {
+  it('keeps sole agents off public holidays when no backup is working (Republic Day)', () => {
+    const jan = run('2027-01')
+    const salt = bpOf(DEMO_BRANDS.unfixableGap, 'RET')
+    expect(jan.issues.filter((i) => i.severity === 'HARD' && i.brand_process_id !== salt)).toEqual([])
+  })
+})
+
 describe('seed roster, December 2026', () => {
+  it('has HARD issues only on the deliberately unfixable Saltmarsh RET, with coverage ≥ 99%', () => {
+    const salt = bpOf(DEMO_BRANDS.unfixableGap, 'RET')
+    const hard = dec.issues.filter((i) => i.severity === 'HARD')
+    expect(hard.length).toBeGreaterThan(0)
+    expect(hard.filter((i) => i.brand_process_id !== salt)).toEqual([])
+    expect(coverageStats(dec.input, dec.roster).pct).toBeGreaterThanOrEqual(99)
+  })
+
   it('shows Saltmarsh Swimwear as the unfixable gap: every weekly off is a HARD gap with no backup to suggest', () => {
     const salt = bpOf(DEMO_BRANDS.unfixableGap, 'RET')
     const zoya = empId('Zoya Khan')

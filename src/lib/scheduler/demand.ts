@@ -37,7 +37,8 @@ export function demandFromContext(ctx: Context, input: Pick<SchedulerInput, 'cov
   const demand: Demand = new Map()
   for (const bp of ctx.brandProcesses) {
     const perDate = new Map<string, number>()
-    for (const date of ctx.dates) {
+    // extended to the boundary weeks' outside days, so weekly-off rules can look across months
+    for (const date of ctx.extendedDates) {
       if (!operates(bp, date, ctx.holidays.has(date))) {
         perDate.set(date, 0)
         continue

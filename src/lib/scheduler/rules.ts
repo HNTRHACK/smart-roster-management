@@ -22,16 +22,25 @@ export function isAbsence(status: RosterDayStatus | undefined): boolean {
 }
 
 /**
- * Offs still owed in a week, given the statuses of its days. The requirement is capped by the
- * days that could hold an off (anything but leave / comp-off / holiday), so a week spent mostly
- * on leave doesn't demand impossible offs.
+ * Offs still owed in a week, given the statuses of its in-month days.
+ * - Pro-rated for partial weeks at the month edges.
+ * - `outsideOffs`: days of the same Mon–Sun week, outside this month, when the person's brands
+ *   are closed anyway (e.g. Sun 3 Jan for a Mon–Sat agent in the 28–31 Dec stub). They already
+ *   give the person their off for that week, so nothing more is owed inside the month.
+ * - Capped by the days that could hold an off (anything but leave / comp-off / holiday), so a
+ *   week spent mostly on leave doesn't demand impossible offs.
  */
-export function weeklyOffShortfall(weeklyOffs: number, weekStatuses: (RosterDayStatus | undefined)[]): {
-  required: number
-  have: number
-} {
+export function weeklyOffShortfall(
+  weeklyOffs: number,
+  weekStatuses: (RosterDayStatus | undefined)[],
+  outsideOffs = 0,
+): { required: number; have: number } {
   const usable = weekStatuses.filter((s) => s !== undefined && !isAbsence(s)).length
-  const required = Math.min(requiredOffsForWeek(weeklyOffs, weekStatuses.length), usable)
+  const required = Math.min(
+    requiredOffsForWeek(weeklyOffs, weekStatuses.length),
+    Math.max(0, weeklyOffs - outsideOffs),
+    usable,
+  )
   const have = weekStatuses.filter(countsAsOff).length
   return { required, have }
 }

@@ -4,6 +4,7 @@
  * suggestions. Nothing is silently accepted.
  */
 import type { RosterDayStatus } from '../../types/db.ts'
+import { outsideStructuralOffs } from './availability.ts'
 import { backupCandidates, eligibleByAssignment } from './backups.ts'
 import { buildContext, type Context } from './context.ts'
 import { isWeekend, WEEKDAY_NAMES, weekdayOf } from './dates.ts'
@@ -147,12 +148,8 @@ function coverageGaps(v: V): Issue[] {
       const blockedWhy = blocked.map((e) => {
         const s = idx.status(e, date)
         if (s !== 'WORK') return `${ctx.name(e)} (${STATUS_WORDS[s ?? 'NOT_SCHEDULED']})`
-        const covers = idx.coversOn(e, date)
-        if (covers.length >= v.opts.dailyLoadCap) return `${ctx.name(e)} (at the daily limit of ${v.opts.dailyLoadCap})`
-        const clash = covers.find(
-          (c) => ctx.brandOf(c).id !== ctx.brandOf(bp.id).id && shiftsOverlap(ctx.shift.get(c)!, ctx.shift.get(bp.id)!),
-        )
-        return `${ctx.name(e)} (${clash ? `on ${ctx.bpLabel(clash)} at the same hours` : 'unavailable'})`
+        // working and eligible but not a candidate → the daily load cap is the only remaining reason
+        return `${ctx.name(e)} (at the daily limit of ${v.opts.dailyLoadCap})`
       })
       for (const b of blocked) {
         if (idx.status(b, date) !== 'WEEK_OFF') continue
@@ -222,7 +219,8 @@ function shiftOverlaps(v: V): Issue[] {
   }
   for (const e of ctx.employees) {
     for (const date of ctx.dates) {
-      const covers = idx.coversOn(e.id, date)
+      // Primary work only: backup cover may run concurrently within the load cap.
+      const covers = idx.primaryCoversOn(e.id, date)
       let clash: [string, string] | null = null
       for (let i = 0; i < covers.length && !clash; i++) {
         for (let j = i + 1; j < covers.length && !clash; j++) {
@@ -282,10 +280,11 @@ function weeklyOffs(v: V): Issue[] {
   const out: Issue[] = []
   for (const e of ctx.employees) {
     if (!idx.rostered.has(e.id)) continue
-    for (const week of ctx.weeks) {
+    for (const [wi, week] of ctx.weeks.entries()) {
       const statuses = week.map((d) => idx.status(e.id, d))
       if (statuses.every((s) => s === undefined)) continue
-      const { required: need, have } = weeklyOffShortfall(e.weekly_offs_per_week, statuses)
+      const outside = outsideStructuralOffs(ctx, v.demand, e.id, wi)
+      const { required: need, have } = weeklyOffShortfall(e.weekly_offs_per_week, statuses, outside)
       if (have >= need) continue
       const safeDay = week.find((d) => idx.status(e.id, d) === 'WORK' && !idx.locked(e.id, d) && !offCreatesGap(v, e.id, d))
       out.push({

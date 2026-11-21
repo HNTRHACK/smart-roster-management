@@ -3,7 +3,7 @@
  * Everything is sorted by id here so later iteration is deterministic regardless of input order.
  */
 import type { Assignment, Brand, BrandProcess, Employee, Pod, Process } from '../../types/db.ts'
-import { formatDay, monthDates, weeksOfMonth } from './dates.ts'
+import { addDays, formatDay, monthDates, weekdayOf, weeksOfMonth } from './dates.ts'
 import { shiftMinutes } from './rules.ts'
 import type { SchedulerInput } from './types.ts'
 
@@ -14,8 +14,13 @@ export type AbsenceKind = 'LEAVE' | 'COMP_OFF'
 export type Context = {
   month: string
   dates: string[]
+  /** Mon–Sun weeks clipped to the month */
   weeks: string[][]
-  holidays: Map<string, string> // date → name
+  /** the same weeks as full Mon–Sun runs of 7 dates, including days outside the month */
+  fullWeeks: string[][]
+  /** month dates plus the outside days of its boundary weeks (for demand look-ahead) */
+  extendedDates: string[]
+  holidays: Map<string, string> // date → name (all input holidays, not only this month's)
   employees: Employee[] // active, sorted by id
   employee: Map<string, Employee>
   brand: Map<string, Brand>
@@ -45,7 +50,6 @@ function push<K, V>(m: Map<K, V[]>, k: K, v: V) {
 
 export function buildContext(input: SchedulerInput): Context {
   const dates = monthDates(input.month)
-  const inMonth = new Set(dates)
 
   const employees = input.employees.filter((e) => e.active).sort(byId)
   const employee = new Map(employees.map((e) => [e.id, e]))
@@ -91,8 +95,13 @@ export function buildContext(input: SchedulerInput): Context {
   }
 
   const holidays = new Map(
-    input.public_holidays.filter((h) => inMonth.has(h.date)).map((h) => [h.date, h.name] as const),
+    input.public_holidays.map((h) => [h.date, h.name] as const),
   )
+  const weeks = weeksOfMonth(input.month)
+  const fullWeeks = weeks.map((w) => {
+    const monday = weekdayOf(w[0]) === 1 ? w[0] : addDays(w[0], -((weekdayOf(w[0]) + 6) % 7))
+    return Array.from({ length: 7 }, (_, i) => addDays(monday, i))
+  })
   const shift = new Map(brandProcesses.map((bp) => [bp.id, shiftMinutes(bp.shift_start, bp.shift_end)]))
 
   const brandOf = (bpId: string) => brand.get(brandProcess.get(bpId)!.brand_id)!
@@ -104,7 +113,9 @@ export function buildContext(input: SchedulerInput): Context {
   return {
     month: input.month,
     dates,
-    weeks: weeksOfMonth(input.month),
+    weeks,
+    fullWeeks,
+    extendedDates: [...new Set(fullWeeks.flat())].sort(),
     holidays,
     employees,
     employee,

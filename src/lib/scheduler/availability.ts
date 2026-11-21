@@ -34,3 +34,17 @@ export function buildAvailability(ctx: Context, demand: Demand): Map<string, Map
   }
   return out
 }
+
+/**
+ * Days of the given week's full Mon–Sun run that fall OUTSIDE the month and on which none of the
+ * employee's primary brand-processes operate (and it isn't a public holiday). These count toward
+ * that week's weekly off. Employees with no primary work never get this credit; leave outside
+ * the month never counts.
+ */
+export function outsideStructuralOffs(ctx: Context, demand: Demand, employeeId: string, weekIndex: number): number {
+  if ((ctx.primaryBpsOf.get(employeeId)?.length ?? 0) === 0) return 0
+  const inMonth = new Set(ctx.weeks[weekIndex])
+  return ctx.fullWeeks[weekIndex].filter(
+    (d) => !inMonth.has(d) && !ctx.holidays.has(d) && !primaryOperates(ctx, demand, employeeId, d),
+  ).length
+}

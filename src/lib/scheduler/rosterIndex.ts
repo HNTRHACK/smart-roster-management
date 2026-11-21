@@ -14,6 +14,8 @@ export type RosterIndex = RosterView & {
   /** distinct people effectively covering bp on date */
   covered: (bpId: string, date: string) => number
   coverersOf: (bpId: string, date: string) => { employeeId: string; isBackup: boolean }[]
+  /** bp ids this employee covers on this date as PRIMARY work (backup cover excluded) */
+  primaryCoversOn: (employeeId: string, date: string) => string[]
   /** employees that have at least one day row */
   rostered: Set<string>
 }
@@ -30,6 +32,7 @@ export function indexRoster(ctx: Context, roster: Roster): RosterIndex {
   }
 
   const covers = new Map<string, string[]>()
+  const primaryCovers = new Map<string, string[]>()
   const coverers = new Map<string, { employeeId: string; isBackup: boolean }[]>()
   const backupCount = new Map<string, number>()
   const seen = new Set<string>()
@@ -40,11 +43,12 @@ export function indexRoster(ctx: Context, roster: Roster): RosterIndex {
     seen.add(dedupe)
     const ek = key(c.employee_id, c.date)
     covers.set(ek, [...(covers.get(ek) ?? []), c.brand_process_id])
+    if (!c.is_backup) primaryCovers.set(ek, [...(primaryCovers.get(ek) ?? []), c.brand_process_id])
     const bk = key(c.brand_process_id, c.date)
     coverers.set(bk, [...(coverers.get(bk) ?? []), { employeeId: c.employee_id, isBackup: c.is_backup }])
     if (c.is_backup) backupCount.set(c.employee_id, (backupCount.get(c.employee_id) ?? 0) + 1)
   }
-  for (const list of covers.values()) list.sort()
+  for (const list of [...covers.values(), ...primaryCovers.values()]) list.sort()
   for (const list of coverers.values()) list.sort((a, b) => a.employeeId.localeCompare(b.employeeId))
 
   return {
@@ -54,6 +58,7 @@ export function indexRoster(ctx: Context, roster: Roster): RosterIndex {
     backupCount: (e) => backupCount.get(e) ?? 0,
     covered: (bp, d) => coverers.get(key(bp, d))?.length ?? 0,
     coverersOf: (bp, d) => coverers.get(key(bp, d)) ?? [],
+    primaryCoversOn: (e, d) => primaryCovers.get(key(e, d)) ?? [],
     rostered,
   }
 }

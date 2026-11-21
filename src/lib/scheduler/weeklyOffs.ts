@@ -6,11 +6,12 @@
  * (+1000 each) so they dominate preference (+20) and fairness (±5/offset).
  */
 import type { Employee, RosterDayStatus } from '../../types/db.ts'
+import { outsideStructuralOffs } from './availability.ts'
 import { eligibleByAssignment } from './backups.ts'
 import type { Context } from './context.ts'
 import { isWeekend, weekdayOf } from './dates.ts'
 import { required, type Demand } from './demand.ts'
-import { longestWorkRun, shiftsOverlap, stableHash, weeklyOffShortfall } from './rules.ts'
+import { longestWorkRun, stableHash, weeklyOffShortfall } from './rules.ts'
 
 export const COST = {
   belowRequired: 1000,
@@ -19,16 +20,19 @@ export const COST = {
   weekendFairness: 5,
   tooManyConsecutive: 1000,
   /**
-   * Extensions to §3.3 (see docs/ASSUMPTIONS.md). §3.3 scores a sole agent's every day at +1000,
-   * so without these the +20 preference decides and offs pile up on the same days, beyond what
-   * the pod's backups can absorb.
+   * Extension to §3.3 (see docs/ASSUMPTIONS.md), for floaters / pod leads only: taking an off on a
+   * day with open gaps they could fill costs +100 per gap, and +300 per gap nobody else eligible
+   * is working to cover. The sum is clamped to `backupTermMax`, so it can never outweigh a spec
+   * HARD term (+1000), e.g. max-consecutive.
    */
-  /** primary off opens a gap and no backup is left free that day (once per day, < any +1000) */
-  noBackupFree: 500,
-  /** floater/pod lead off on a day with open gaps they could fill */
   neededAsBackup: 100,
-  /** floater/pod lead off on a day they're already earmarked to cover */
-  reservedAsBackup: 300,
+  onlyPossibleBackup: 300,
+  backupTermMax: 900,
+  /**
+   * Extension, for people with primary work: the off opens a gap and no eligible backup is even
+   * working that day (typically a public holiday or leave). Once per day, < any +1000 term.
+   */
+  noBackupWorking: 500,
 } as const
 
 export type DayState = {
@@ -71,8 +75,7 @@ export function shortfallIfOff(ctx: Context, demand: Demand, state: DayState, em
   return short
 }
 
-export function placeWeeklyOffs(ctx: Context, demand: Demand, state: DayState, loadCap: number): void {
-  const plan = backupPlan(ctx, demand, state, loadCap)
+export function placeWeeklyOffs(ctx: Context, demand: Demand, state: DayState): void {
   const weekendOffs = new Map<string, number>()
   for (const e of ctx.employees) {
     weekendOffs.set(e.id, ctx.dates.filter((d) => isWeekend(d) && state.status(e.id, d) === 'WEEK_OFF').length)
@@ -84,13 +87,15 @@ export function placeWeeklyOffs(ctx: Context, demand: Demand, state: DayState, l
     const podPeers = processed.filter((p) => p.pod_id === emp.pod_id)
     const hasPrimaries = (ctx.primaryBpsOf.get(emp.id)?.length ?? 0) > 0
 
-    for (const week of ctx.weeks) {
+    for (const [wi, week] of ctx.weeks.entries()) {
+      const outsideOffs = outsideStructuralOffs(ctx, demand, emp.id, wi)
       const throughWeek = ctx.dates.slice(0, ctx.dates.indexOf(week[week.length - 1]) + 1)
 
       for (;;) {
         const { required: need, have } = weeklyOffShortfall(
           emp.weekly_offs_per_week,
           week.map((d) => state.status(emp.id, d)),
+          outsideOffs,
         )
         if (have >= need) break
         const candidates = week.filter((d) => state.status(emp.id, d) === 'WORK' && !state.isFixed(emp.id, d))
@@ -106,16 +111,10 @@ export function placeWeeklyOffs(ctx: Context, demand: Demand, state: DayState, l
           if (isWeekend(date)) c += COST.weekendFairness * (weekendOffs.get(emp.id)! - avgWeekend)
           const run = longestWorkRun(throughWeek.map((d) => (d === date ? 'WEEK_OFF' : state.status(emp.id, d))))
           if (run > emp.max_consecutive_work_days) c += COST.tooManyConsecutive
-          if (hasPrimaries) {
-            // charged once per day (not per brand-process) so it can never outweigh a spec
-            // HARD term (+1000), e.g. max-consecutive
-            const uncoverable = shortBpsIfOff(ctx, demand, state, emp.id, date).some(
-              (bp) => !plan.freeBackup(bp, date, emp.id),
-            )
-            if (uncoverable) c += COST.noBackupFree
-          } else {
-            c += COST.neededAsBackup * openGapsCoverableBy(ctx, demand, state, emp.id, date)
-            c += COST.reservedAsBackup * plan.reservedOn(emp.id, date)
+          if (hasPrimaries && noBackupWorking(ctx, demand, state, emp.id, date)) c += COST.noBackupWorking
+          if (!hasPrimaries) {
+            const g = openGapsCoverableBy(ctx, demand, state, emp.id, date)
+            c += Math.min(COST.backupTermMax, COST.neededAsBackup * g.gaps + COST.onlyPossibleBackup * g.onlyMe)
           }
           return c
         }
@@ -131,80 +130,52 @@ export function placeWeeklyOffs(ctx: Context, demand: Demand, state: DayState, l
         }
         state.setStatus(emp.id, best, 'WEEK_OFF')
         if (isWeekend(best)) weekendOffs.set(emp.id, weekendOffs.get(emp.id)! + 1)
-        // earmark a backup for each gap this off opens, so later offs compete for what's left
-        for (const bp of shortBpsIfOff(ctx, demand, state, emp.id, best)) {
-          const b = plan.freeBackup(bp, best, emp.id)
-          if (b) plan.reserve(b, best, bp)
-        }
       }
     }
   }
 }
 
-/** The person's primary brand-processes that would be short if they were off on `date`. */
-function shortBpsIfOff(ctx: Context, demand: Demand, state: DayState, employeeId: string, date: string): string[] {
-  return (ctx.primaryBpsOf.get(employeeId) ?? []).filter((bp) => {
-    const req = required(demand, bp, date)
-    if (req === 0) return false
-    return ctx.primariesOf.get(bp)!.filter((q) => q !== employeeId && state.status(q, date) === 'WORK').length < req
-  })
-}
-
 /**
- * Backup capacity planning during placement. A backup working on a day can take on brand-processes
- * up to the load cap, but never two different brands with overlapping shifts. Their own primary
- * work that day occupies them too. Earmarks are only a planning aid; actual backup cover is
- * assigned after placement (§3.4) from the final schedule.
+ * Gaps already open on `date` (primaries alone fall short) that this person could back up, and
+ * how many of those nobody else eligible is working to cover.
  */
-function backupPlan(ctx: Context, demand: Demand, state: DayState, loadCap: number) {
-  const reserved = new Map<string, string[]>() // emp|date → bps
-  const busyWith = (e: string, date: string): string[] => [
-    ...(ctx.primaryBpsOf.get(e) ?? []).filter((bp) => required(demand, bp, date) > 0),
-    ...(reserved.get(`${e}|${date}`) ?? []),
-  ]
-  const canTake = (e: string, bp: string, date: string): boolean => {
-    if (state.status(e, date) !== 'WORK') return false
-    const busy = busyWith(e, date)
-    if (busy.includes(bp) || busy.length >= loadCap) return false
-    const brand = ctx.brandOf(bp).id
-    const shift = ctx.shift.get(bp)!
-    return !busy.some((b) => ctx.brandOf(b).id !== brand && shiftsOverlap(ctx.shift.get(b)!, shift))
-  }
-  return {
-    freeBackup(bp: string, date: string, exclude: string): string | null {
-      const pod = ctx.brandOf(bp).pod_id
-      let best: { id: string; samePod: boolean; load: number } | null = null
-      for (const e of ctx.employees) {
-        if (e.id === exclude || !eligibleByAssignment(ctx, e.id, bp) || !canTake(e.id, bp, date)) continue
-        const cand = { id: e.id, samePod: e.pod_id === pod, load: busyWith(e.id, date).length }
-        if (
-          !best ||
-          Number(cand.samePod) > Number(best.samePod) ||
-          (cand.samePod === best.samePod && cand.load < best.load)
-        ) {
-          best = cand
-        }
-      }
-      return best?.id ?? null
-    },
-    reserve(e: string, date: string, bp: string) {
-      const k = `${e}|${date}`
-      reserved.set(k, [...(reserved.get(k) ?? []), bp])
-    },
-    reservedOn(e: string, date: string): number {
-      return reserved.get(`${e}|${date}`)?.length ?? 0
-    },
-  }
-}
-
-/** Gaps already open on `date` (primaries alone fall short) that this person could back up. */
-function openGapsCoverableBy(ctx: Context, demand: Demand, state: DayState, employeeId: string, date: string): number {
-  let n = 0
+function openGapsCoverableBy(
+  ctx: Context,
+  demand: Demand,
+  state: DayState,
+  employeeId: string,
+  date: string,
+): { gaps: number; onlyMe: number } {
+  let gaps = 0
+  let onlyMe = 0
   for (const bp of ctx.brandProcesses) {
     const req = required(demand, bp.id, date)
     if (req === 0 || !eligibleByAssignment(ctx, employeeId, bp.id)) continue
-    const working = (ctx.primariesOf.get(bp.id) ?? []).filter((q) => state.status(q, date) === 'WORK').length
-    if (working < req) n++
+    const primaries = ctx.primariesOf.get(bp.id) ?? []
+    const working = primaries.filter((q) => state.status(q, date) === 'WORK').length
+    if (working >= req) continue
+    gaps++
+    const someoneElse = ctx.employees.some(
+      (e) =>
+        e.id !== employeeId &&
+        !primaries.includes(e.id) &&
+        state.status(e.id, date) === 'WORK' &&
+        eligibleByAssignment(ctx, e.id, bp.id) !== null,
+    )
+    if (!someoneElse) onlyMe++
   }
-  return n
+  return { gaps, onlyMe }
+}
+
+/** Would this person's off on `date` open a gap that no eligible backup is working to cover? */
+function noBackupWorking(ctx: Context, demand: Demand, state: DayState, employeeId: string, date: string): boolean {
+  return (ctx.primaryBpsOf.get(employeeId) ?? []).some((bp) => {
+    const req = required(demand, bp, date)
+    if (req === 0) return false
+    const primaries = ctx.primariesOf.get(bp)!
+    if (primaries.filter((q) => q !== employeeId && state.status(q, date) === 'WORK').length >= req) return false
+    return !ctx.employees.some(
+      (e) => !primaries.includes(e.id) && state.status(e.id, date) === 'WORK' && eligibleByAssignment(ctx, e.id, bp) !== null,
+    )
+  })
 }

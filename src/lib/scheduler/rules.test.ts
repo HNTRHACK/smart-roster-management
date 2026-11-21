@@ -74,6 +74,71 @@ describe('weeks and pro-rated weekly offs', () => {
   })
 })
 
+describe('backup covers concurrently within the load cap (§3.4, Phase 3.1 rule)', () => {
+  // Two sole agents on different brands in one pod, both on CS 09–18, no backup assignments:
+  // each is eligible for the other's brand via "same process in the same pod".
+  const pair = (e2OwnProcesses: ('CS' | 'ACC' | 'NDR')[]) =>
+    makeInput({
+      employees: [
+        employee('e1', { name: 'Ana', preferred_off_weekday: 1 }),
+        employee('e2', { name: 'Ben', preferred_off_weekday: 2 }),
+      ],
+      brands: [brand('b1', { name: 'Alpha' }), brand('b2', { name: 'Beta' })],
+      brand_processes: [
+        bp('b1cs', 'b1', 'CS', 'ALL_DAYS'),
+        ...e2OwnProcesses.map((code) => bp(`b2${code}`, 'b2', code, 'ALL_DAYS')),
+      ],
+      assignments: [assign('e1', 'b1cs'), ...e2OwnProcesses.map((code) => assign('e2', `b2${code}`))],
+    })
+
+  it('lets a backup cover another brand during their own shift, without SHIFT_OVERLAP', () => {
+    const input = pair(['CS'])
+    const roster = generateRoster(input)
+    const issues = validateRoster(input, roster)
+
+    expect(issues.filter((i) => i.severity === 'HARD')).toEqual([])
+    // Ana's Monday offs are covered by Ben while he works Beta at the same hours
+    const benBackup = roster.coverage.filter((c) => c.employee_id === 'e2' && c.is_backup)
+    expect(benBackup.map((c) => c.brand_process_id)).toEqual(['b1cs', 'b1cs', 'b1cs', 'b1cs'])
+    for (const c of benBackup) {
+      expect(roster.coverage).toContainEqual({ employee_id: 'e2', date: c.date, brand_process_id: 'b2CS', is_backup: false })
+    }
+  })
+
+  it('stops at 3 brand-processes a day (own + covered)', () => {
+    const input = pair(['CS', 'ACC', 'NDR']) // Ben already has 3 of his own
+    const roster = generateRoster(input)
+    const anaOffs = roster.days.filter((d) => d.employee_id === 'e1' && d.status === 'WEEK_OFF').map((d) => d.date)
+    const gaps = validateRoster(input, roster).filter((i) => i.code === 'UNCOVERED' && i.brand_process_id === 'b1cs')
+
+    expect(gaps.map((g) => g.date)).toEqual(anaOffs)
+    for (const g of gaps) expect(g.message).toMatch(/Ben \(at the daily limit of 3\)/)
+  })
+})
+
+describe('boundary weeks count closed days just outside the month', () => {
+  // Dec 2026 ends on Thursday 31; Sun 3 Jan is in the same Mon–Sun week.
+  const input = makeInput({
+    month: '2026-12',
+    employees: [employee('monSat'), employee('everyDay')],
+    brands: [brand('b1'), brand('b2')],
+    brand_processes: [bp('bp1', 'b1', 'CS', 'NO_SUN_NO_PH'), bp('bp2', 'b2', 'CS', 'ALL_DAYS')],
+    assignments: [assign('monSat', 'bp1'), assign('everyDay', 'bp2')],
+  })
+  const roster = generateRoster(input)
+  const offsIn = (emp: string, from: string, to: string) =>
+    roster.days.filter((d) => d.employee_id === emp && d.status === 'WEEK_OFF' && d.date >= from && d.date <= to)
+
+  it('gives a Mon–Sat agent no off in 28–31 Dec, because Sun 3 Jan is already closed for them', () => {
+    expect(offsIn('monSat', '2026-12-28', '2026-12-31')).toEqual([])
+    expect(validateRoster(input, roster).filter((i) => i.code === 'MISSING_WEEKLY_OFF')).toEqual([])
+  })
+
+  it('still gives an every-day agent one off in that stub', () => {
+    expect(offsIn('everyDay', '2026-12-28', '2026-12-31')).toHaveLength(1)
+  })
+})
+
 describe('§3.5 validator on hand-made rosters', () => {
   const input = makeInput({
     employees: [employee('e1', { name: 'Tireless Tia' })],

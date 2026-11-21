@@ -45,7 +45,7 @@ export function generateRoster(input: SchedulerInput, opts: SchedulerOptions = {
   }
 
   // §3.3 weekly offs
-  placeWeeklyOffs(ctx, demand, state, loadCap)
+  placeWeeklyOffs(ctx, demand, state)
 
   // Coverage: everyone working covers each of their primary brand-processes that operates today.
   const coverage: CoverageEntry[] = []
@@ -89,8 +89,9 @@ export function generateRoster(input: SchedulerInput, opts: SchedulerOptions = {
   // Comp-off credit for anyone who works a public holiday (§3.2)
   const comp_offs_earned: CompOffEarned[] = []
   for (const e of ctx.employees) {
-    for (const [date, name] of ctx.holidays) {
-      if (state.status(e.id, date) === 'WORK' && (covers.get(key(e.id, date))?.length ?? 0) > 0) {
+    for (const date of ctx.dates) {
+      const name = ctx.holidays.get(date)
+      if (name !== undefined && state.status(e.id, date) === 'WORK' && (covers.get(key(e.id, date))?.length ?? 0) > 0) {
         comp_offs_earned.push({ employee_id: e.id, date, reason: `Worked public holiday: ${name}` })
       }
     }
