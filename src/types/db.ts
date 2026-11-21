@@ -80,18 +80,18 @@ export type IssueCode = HardIssueCode | SoftIssueCode
 /** 0 = Sunday … 6 = Saturday (matches JS Date#getDay and the DB check constraints). */
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6
 
-type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[]
+export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[]
 
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
-export interface Pod {
+export type Pod = {
   id: string
   name: string
   lead_employee_id: string | null
 }
 
-export interface Employee {
+export type Employee = {
   id: string
   name: string
   email: string | null
@@ -103,20 +103,20 @@ export interface Employee {
   active: boolean
 }
 
-export interface Process {
+export type Process = {
   id: string
   code: string // 'CS' | 'ACC' | 'NDR' | 'RET' | … (open-ended by design)
   name: string
 }
 
-export interface Brand {
+export type Brand = {
   id: string
   name: string
   pod_id: string
   active: boolean
 }
 
-export interface BrandProcess {
+export type BrandProcess = {
   id: string
   brand_id: string
   process_id: string
@@ -127,7 +127,7 @@ export interface BrandProcess {
   shift_end: string
 }
 
-export interface CoverageOverride {
+export type CoverageOverride = {
   id: string
   brand_process_id: string
   weekday: Weekday | null
@@ -135,20 +135,20 @@ export interface CoverageOverride {
   min_staff: number
 }
 
-export interface Assignment {
+export type Assignment = {
   id: string
   employee_id: string
   brand_process_id: string
   kind: AssignmentKind
 }
 
-export interface PublicHoliday {
+export type PublicHoliday = {
   id: string
   date: string
   name: string
 }
 
-export interface Leave {
+export type Leave = {
   id: string
   employee_id: string
   start_date: string
@@ -157,7 +157,7 @@ export interface Leave {
   status: LeaveStatus
 }
 
-export interface CompOffLedgerEntry {
+export type CompOffLedgerEntry = {
   id: string
   employee_id: string
   earned_on: string
@@ -165,7 +165,7 @@ export interface CompOffLedgerEntry {
   used_on: string | null
 }
 
-export interface Roster {
+export type Roster = {
   id: string
   month: string // first day of month, "YYYY-MM-01"
   version: number
@@ -174,7 +174,7 @@ export interface Roster {
   notes: string | null
 }
 
-export interface RosterDay {
+export type RosterDay = {
   id: string
   roster_id: string
   employee_id: string
@@ -184,7 +184,7 @@ export interface RosterDay {
   locked: boolean
 }
 
-export interface RosterCoverage {
+export type RosterCoverage = {
   id: string
   roster_id: string
   date: string
@@ -193,13 +193,13 @@ export interface RosterCoverage {
   is_backup: boolean
 }
 
-export interface IssueSuggestion {
+export type IssueSuggestion = {
   label: string
   /** Machine-readable action the UI can apply (shape defined by the scheduler in Phase 3). */
   action?: { [key: string]: Json | undefined }
 }
 
-export interface RosterIssue {
+export type RosterIssue = {
   id: string
   roster_id: string
   date: string | null
@@ -211,7 +211,7 @@ export interface RosterIssue {
   suggestion: IssueSuggestion[]
 }
 
-export interface ChangeLogEntry {
+export type ChangeLogEntry = {
   id: string
   roster_id: string | null
   at: string
@@ -250,7 +250,7 @@ export const TABLE_NAMES = [
 ] as const
 export type TableName = (typeof TABLE_NAMES)[number]
 
-export interface Database {
+export type Database = {
   public: {
     Tables: {
       pods: TableDef<Pod, 'id' | 'lead_employee_id'>
@@ -286,7 +286,13 @@ export interface Database {
       change_log: TableDef<ChangeLogEntry, 'id' | 'roster_id' | 'at' | 'actor' | 'payload'>
     }
     Views: { [_ in never]: never }
-    Functions: { [_ in never]: never }
+    Functions: {
+      /** Wipes all tables and loads the demo seed atomically (demo only; see migration). */
+      reset_demo_data: {
+        Args: { payload: Json }
+        Returns: Json // { <table>: row count, … }
+      }
+    }
     Enums: {
       employee_role: EmployeeRole
       calendar_rule: CalendarRule

@@ -1,7 +1,22 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { DB_ENUMS, HARD_ISSUE_CODES, SOFT_ISSUE_CODES, TABLE_NAMES } from './db'
+import {
+  DB_ENUMS,
+  HARD_ISSUE_CODES,
+  SOFT_ISSUE_CODES,
+  TABLE_NAMES,
+  type Database,
+  type TableName,
+} from './db'
+
+// Compile-time guard (checked by `tsc -b` in `npm run build`): supabase-js only applies the
+// Database types if every Row is assignable to Record<string, unknown>. Interfaces are not,
+// so row types must stay `type` aliases — otherwise queries silently become untyped.
+type RowIsRecord = {
+  [K in TableName]: Database['public']['Tables'][K]['Row'] extends Record<string, unknown> ? true : false
+}
+const rowsAreRecords: RowIsRecord[TableName] = true
 
 // Guards against drift between the SQL migrations and the hand-written TS types.
 const migrationsDir = join(process.cwd(), 'supabase', 'migrations')
@@ -40,6 +55,12 @@ describe('db types match the migration', () => {
   it('enables RLS for every table', () => {
     for (const t of TABLE_NAMES) expect(sql).toContain(`'${t}'`)
     expect(sql).toMatch(/enable row level security/)
+  })
+})
+
+describe('supabase-js compatibility', () => {
+  it('uses type aliases for rows so supabase-js applies the Database types', () => {
+    expect(rowsAreRecords).toBe(true)
   })
 })
 
