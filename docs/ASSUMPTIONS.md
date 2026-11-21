@@ -39,3 +39,55 @@ Every assumption made while building, grouped by phase. The README's assumptions
   - That function is `security definer` and anyone with the anon key can run it. This is demo-only, and it adds no new exposure, because the open RLS policies already let anon delete every row.
 - **One dataset, three ways to load it:** `npm run seed` (CLI), the app's Reset button, and `npx supabase db reset`. The last one loads `supabase/seed.sql`, which is generated from the TS data with `npm run seed -- --sql`. A test fails if that file is out of date.
 - **Local Supabase ports are 544xx** (API 54421, DB 54422), not the default 543xx, so this project can run alongside another local Supabase project.
+
+## Phase 3: Scheduler and validator
+
+**Calendars and demand (§3.1)**
+- **CUSTOM calendars also close on public holidays.** They operate only on their listed weekdays, and not on a public holiday that falls on one of them.
+- **Coverage overrides only apply on days the brand-process operates.** This follows the wording of §3.1. A sale-day override on a closed Sunday is ignored. Order of precedence: date > weekday > default `min_staff`.
+- **Inactive brands and employees are left out completely.**
+
+**Availability (§3.2)**
+- **A public holiday given as the day off (HOLIDAY) does not count toward the weekly off** (user decision). Holidays are extra. So in Christmas week, a sole agent on a NO_PUBLIC_HOLIDAYS brand still needs a weekly off on a working day.
+- **Working a public holiday earns a comp-off.** It's returned in `roster.comp_offs_earned`, to be written to `comp_off_ledger` in Phase 4. This applies to anyone rostered WORK on a holiday while covering something.
+- **Floaters and pod leads** (no primary assignments) are on duty every day except public holidays, so they can act as backups. They still get weekly offs.
+- **Only APPROVED leaves count.** PENDING and REJECTED leaves are ignored. A planned or sick leave takes priority over a comp-off on the same day.
+
+**Weekly offs (§3.3)**
+- **Partial weeks are pro-rated.** Weeks run Mon–Sun, clipped to the month. Offs needed = `round(weekly_offs_per_week × days / 7)`, so with 1 off a week, a stub of 4–7 days needs 1 off and a stub of 1–3 days needs none.
+- **The requirement is capped at the days that could hold an off.** A week spent mostly on leave doesn't demand impossible offs. WEEK_OFF and NOT_SCHEDULED days count toward it; HOLIDAY, LEAVE and COMP_OFF don't.
+- **Each month starts a fresh consecutive-days count on day 1.** The previous month's roster isn't consulted yet; Phase 6 replan can add that.
+- **Processing order:**
+  1. Sole resources on an ALL_DAYS process.
+  2. Employees who work across 2 or more brands.
+  3. Everyone else with primary work.
+  4. **Floaters and pod leads, last.** §3.3 only lists the first three groups. Putting backups last lets them place their offs once every gap is known.
+
+  Ties within a group go by employee id.
+- **Extensions to the §3.3 cost function.** §3.3 scores every day of a sole agent at +1000, so the +20 preference ends up deciding. Without these extensions, offs piled up on the same days (often Sundays, because of preferences), beyond what a pod's backups could cover. In December that left 44 HARD issues and 95.3% coverage; with the extensions it's 23 HARD and 97.5%. The extensions:
+  - **+500 when an off opens a gap and no backup is left free that day.** It's charged once per day, so it can never outweigh a spec +1000 term such as max-consecutive. Each chosen off earmarks a backup, so later offs compete for whatever capacity is left.
+  - **For floaters and pod leads:** +100 for each open gap they could fill that day, and +300 for each gap they're already earmarked for.
+  - **The trade-off:** more SOFT `PREFERENCE_VIOLATED` issues (17 instead of 8 in December), because coverage beats preference.
+- **Tie-break.** "employee id + date" is implemented as a stable hash of `employee_id|date`. It's deterministic, and unlike "earliest date wins" it doesn't put everyone's off on a Monday.
+- **Locked and MANUAL days** passed in as `fixedDays` are never changed. They count toward weekly offs and consecutive days like any other day. This is the basis for test 7; `replan` (§3.6) itself arrives in Phase 6.
+
+**Backups (§3.4)**
+- **Who counts as a candidate:** someone with a backup assignment on that brand-process, or anyone in the same pod assigned (primary or backup) to the same process on another brand.
+- **Load limits:** at most 3 brand-processes per person per day. A backup can't cover two *different* brands with overlapping shifts. Because almost every demo brand runs 09:00–18:00, in practice a backup covers one other brand per day, and that limit is what drives most of the remaining gaps.
+- **Shift overlap is only checked across different brands.** Processes of the same brand overlapping in time count as normal multitasking. An end time at or before the start time means an overnight shift.
+
+**Validator (§3.5)**
+- **What it reads:** it uses only `(input, roster)`, so it treats generated and hand-edited rosters the same way. A coverage row only counts if that employee is WORK that day. A missing day row counts as not working.
+- **One HARD issue per gap, never two:**
+  - `NO_ASSIGNED_AVAILABLE` when everyone assigned (primary and backup) is on approved leave or comp-off, or nobody is assigned at all. Nothing can be rearranged among them.
+  - `UNCOVERED` otherwise.
+- **Suggestions, in order, at most 3:**
+  1. A free backup (`ASSIGN_BACKUP`).
+  2. Moving a primary's or backup's weekly off to another day in the same week, if that opens no new gap and keeps the consecutive-days limit (`MOVE_WEEK_OFF`).
+  3. Otherwise a setup change: add a backup (`ADD_BACKUP_ASSIGNMENT`).
+- **When SOFT issues fire:**
+  - `PREFERENCE_VIOLATED`: one per employee per week, when they got a weekly off but not on their preferred weekday, and that weekday was a working day that week.
+  - `UNFAIR_WEEKEND_OFFS`: someone has 2 or more fewer weekend offs than the average of pod members who work weekends. Only people who are short are flagged, not people who are ahead.
+  - `BACKUP_OVERLOAD`: more than 8 backup covers in a month.
+  - `CROSS_BRAND_IMPACT`: on a given date, one person's absence leaves 2 or more brands short on primary staff alone, whether or not backups then fill the gaps. The message says which gaps were covered and which are still open.
+- **Thresholds are options:** `dailyLoadCap`, `backupOverloadThreshold` and `unfairWeekendGap` are all in `SchedulerOptions`.
